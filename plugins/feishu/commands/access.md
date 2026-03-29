@@ -1,6 +1,6 @@
 ---
-name: access
 description: 管理 Feishu channel 的 allowlist（open_id）。用于新增、删除、查看允许用户。
+allowed-tools: Read, Write
 ---
 
 管理文件：`~/.claude/channels/feishu/access.json`

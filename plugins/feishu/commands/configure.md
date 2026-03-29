@@ -1,6 +1,6 @@
 ---
-name: configure
 description: 配置 Feishu channel 的 App ID、App Secret、allowlist。用于首次配置或修改凭据。
+allowed-tools: Read, Write, Bash(mkdir *), Bash(chmod *)
 ---
 
 你正在引导用户配置 Feishu channel 插件。采用交互式问答方式，逐步收集信息并帮用户完成配置。
