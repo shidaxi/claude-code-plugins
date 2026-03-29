@@ -295,13 +295,25 @@ const dispatcher = new lark.EventDispatcher({
           event?.message?.message_type ?? "unknown"
         } chat_id=${event?.message?.chat_id ?? "unknown"} deliver=${String(deliver)}`
       );
-      if (!deliver) {
-        return;
-      }
 
       const message = event?.message ?? {};
       const chatId = String(message.chat_id ?? "");
       if (!chatId) return;
+
+      // Handle built-in commands before access check — allow anyone to query their own ID.
+      const textContent = extractTextContent(message.message_type, message.content);
+      if (isMyIdCommand(textContent)) {
+        debugLog(`responding to my-id command from ${senderOpenId}`);
+        await sendText(
+          chatId,
+          `Your open_id: ${senderOpenId}\n\nTo add to allowlist, ask the admin to run:\n/feishu:access add ${senderOpenId}`
+        );
+        return;
+      }
+
+      if (!deliver) {
+        return;
+      }
 
       // Persist last active chat for startup notification on next restart.
       saveLastChatId(chatId);
@@ -485,6 +497,27 @@ function debugLog(message: string): void {
   fileLog(message);
   if (!DEBUG) return;
   process.stderr.write(`feishu channel [debug]: ${message}\n`);
+}
+
+const MY_ID_PATTERNS = [
+  /^(我的|my)\s*(lark|feishu|飞书)?\s*(id|open.?id)$/i,
+  /^what'?s?\s+my\s+(id|open.?id)$/i,
+  /^\/?(myid|my.id|whoami)$/i,
+];
+
+function isMyIdCommand(text: string): boolean {
+  const trimmed = text.trim();
+  return MY_ID_PATTERNS.some((re) => re.test(trimmed));
+}
+
+function extractTextContent(messageTypeRaw: unknown, contentRaw: unknown): string {
+  if (String(messageTypeRaw ?? "") !== "text") return "";
+  try {
+    const parsed = JSON.parse(String(contentRaw ?? "")) as { text?: string };
+    return parsed.text ?? "";
+  } catch {
+    return "";
+  }
 }
 
 function asReceiveIdType(
