@@ -158,7 +158,13 @@ function notifyStartup(): void {
   if (!chatId) return;
   startupNotified = true;
   const profileLabel = FEISHU_PROFILE ? ` [${FEISHU_PROFILE}]` : "";
-  sendText(chatId, `✅ Claude Code${profileLabel} 已就绪，可以发消息了`).catch((err) => {
+  const cwd = process.cwd();
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
+  sendText(
+    chatId,
+    `✅ Claude Code${profileLabel} 已就绪，可以发消息了\n📁 ${cwd}\n📅 ${today}`,
+  ).catch((err) => {
     fileLog(`startup notification failed: ${String(err)}`);
   });
   fileLog(`startup notification sent to chat_id=${chatId}`);
