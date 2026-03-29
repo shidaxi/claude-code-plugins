@@ -11,13 +11,16 @@ Claude Code 插件市场 by shidaxi.
 ## 安装
 
 ```bash
-# 1. 在 Claude Code 中安装市场
+# 1. 添加 marketplace
+/plugin marketplace add shidaxi/claude-code-plugins
+
+# 2. 安装飞书插件
 /plugin install feishu@shidaxi
 
-# 2. 配置飞书凭据
+# 3. 配置飞书凭据
 /feishu:configure
 
-# 3. 启动 channel
+# 4. 启动 channel
 claude --channels plugin:feishu@shidaxi
 ```
 
