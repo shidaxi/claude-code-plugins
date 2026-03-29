@@ -1,19 +1,50 @@
 ---
 description: 配置 Feishu channel 的 App ID、App Secret、allowlist。用于首次配置或修改凭据。
-allowed-tools: Read, Write, Bash(mkdir *), Bash(chmod *)
+allowed-tools: Read, Write, Bash(mkdir *), Bash(chmod *), Bash(ls *), Bash(cat *)
 ---
 
 你正在引导用户配置 Feishu channel 插件。采用交互式问答方式，逐步收集信息并帮用户完成配置。
 
-状态目录：`~/.claude/channels/feishu`
+状态目录结构：
+
+- 默认 profile：`~/.claude/channels/feishu`
+- 命名 profile（如 `bot1`）：`~/.claude/channels/feishu/profiles/bot1`
 
 ---
 
 ## 交互流程
 
-### Step 1：检查现有配置
+### Step 1：选择 Profile 并检查现有配置
 
-先检查 `~/.claude/channels/feishu/.env` 是否已存在。如果已存在且包含 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`，告知用户当前已有配置（仅显示 App ID，不显示 Secret），询问是否要重新配置。
+**1a) 确定要配置的 profile：**
+
+按优先级确定 profile：
+
+1. **命令参数**：如 `/feishu:configure bot1` → 直接使用 `bot1`，跳过询问
+2. **环境变量**：执行 `echo $FEISHU_PROFILE`，如果非空 → 提示 "检测到 FEISHU_PROFILE=bot1，将配置 bot1 profile。确认？(Y/n)"，用户确认后使用
+3. **交互选择**：以上都没有时，列出已有 profile 供用户选择
+
+列出已有 profile（仅在交互选择时需要）：
+- `ls ~/.claude/channels/feishu/profiles/ 2>/dev/null` — 列出命名 profile
+- `cat ~/.claude/channels/feishu/.env 2>/dev/null | grep FEISHU_APP_ID` — 检查默认 profile
+
+```
+已有的 profile：
+  - (default)  App ID: cli_xxx  ← $FEISHU_PROFILE 未设置时使用
+  - bot1       App ID: (未配置)
+  - bot2       App ID: cli_yyy
+
+你要配置哪个 profile？输入名称，或 "default" 配置默认 profile，或输入新名称创建新 profile。
+```
+
+**1b) 计算状态目录：**
+
+- 用户选择 `default` 或空 → `~/.claude/channels/feishu`
+- 用户输入名称（如 `bot1`） → `~/.claude/channels/feishu/profiles/bot1`
+
+**1c) 检查现有配置：**
+
+检查 `<状态目录>/.env` 是否已存在。如果已存在且包含 `FEISHU_APP_ID` 和 `FEISHU_APP_SECRET`，告知用户当前已有配置（仅显示 App ID，不显示 Secret），询问是否要重新配置。
 
 ### Step 2：引导创建飞书应用
 
@@ -108,10 +139,10 @@ allowed-tools: Read, Write, Bash(mkdir *), Bash(chmod *)
 
 1. 创建目录：
    ```
-   mkdir -p ~/.claude/channels/feishu
+   mkdir -p <状态目录>
    ```
 
-2. 写入 `~/.claude/channels/feishu/.env`：
+2. 写入 `<状态目录>/.env`：
    ```
    FEISHU_APP_ID=<用户提供的值>
    FEISHU_APP_SECRET=<用户提供的值>
@@ -128,10 +159,10 @@ allowed-tools: Read, Write, Bash(mkdir *), Bash(chmod *)
 
 3. 设置文件权限：
    ```
-   chmod 600 ~/.claude/channels/feishu/.env
+   chmod 600 <状态目录>/.env
    ```
 
-4. 如果用户提供了 allowlist，同步写入 `~/.claude/channels/feishu/access.json`：
+4. 如果用户提供了 allowlist，同步写入 `<状态目录>/access.json`：
    ```json
    {
      "allowFrom": ["ou_xxx", "ou_yyy"]
@@ -140,10 +171,13 @@ allowed-tools: Read, Write, Bash(mkdir *), Bash(chmod *)
 
 ### Step 7：确认并提示下一步
 
-配置完成后，输出摘要（仅显示 App ID，不显示 Secret），并提醒：
+配置完成后，输出摘要（仅显示 App ID，不显示 Secret，标注 profile 名），并提醒：
 
-- 重启 Claude Code 会话：`claude --channels plugin:feishu@shidaxi`
+- 启动方式（根据 profile 类型）：
+  - 默认 profile：`claude --channel feishu`
+  - 命名 profile：`FEISHU_PROFILE=<name> claude --channel feishu`
 - 在飞书中找到机器人发消息测试
+- 如需配置其他 profile，再次运行 `/feishu:configure`
 
 ---
 

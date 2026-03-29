@@ -24,8 +24,12 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+const FEISHU_PROFILE = process.env.FEISHU_PROFILE ?? "";
 const STATE_DIR =
-  process.env.FEISHU_STATE_DIR ?? join(homedir(), ".claude", "channels", "feishu");
+  process.env.FEISHU_STATE_DIR ??
+  (FEISHU_PROFILE
+    ? join(homedir(), ".claude", "channels", "feishu", "profiles", FEISHU_PROFILE)
+    : join(homedir(), ".claude", "channels", "feishu"));
 const ENV_FILE = join(STATE_DIR, ".env");
 const ACCESS_FILE = join(STATE_DIR, "access.json");
 const LOG_FILE = join(STATE_DIR, "feishu.log");
@@ -70,7 +74,7 @@ process.on("uncaughtException", (err) => {
 });
 
 debugLog(
-  `boot config: app_id=${mask(APP_ID)} domain=${DOMAIN || "default"} allowlist_size=${
+  `boot config: profile=${FEISHU_PROFILE || "(default)"} app_id=${mask(APP_ID)} domain=${DOMAIN || "default"} allowlist_size=${
     access.allowFrom.length
   } require_allowlist=${String(requireAllowlist)}`
 );
@@ -153,7 +157,8 @@ function notifyStartup(): void {
   const chatId = readLastChatId();
   if (!chatId) return;
   startupNotified = true;
-  sendText(chatId, "✅ Claude Code 已就绪，可以发消息了").catch((err) => {
+  const profileLabel = FEISHU_PROFILE ? ` [${FEISHU_PROFILE}]` : "";
+  sendText(chatId, `✅ Claude Code${profileLabel} 已就绪，可以发消息了`).catch((err) => {
     fileLog(`startup notification failed: ${String(err)}`);
   });
   fileLog(`startup notification sent to chat_id=${chatId}`);
@@ -303,6 +308,18 @@ const PermissionRequestSchema = z.object({
   }),
 });
 
+const CODEBLOCK_MAX_LINES = 5;
+
+function formatCodeBlock(raw: string): string {
+  const lines = raw.split("\n");
+  if (lines.length <= CODEBLOCK_MAX_LINES) {
+    return `\`\`\`\n${raw}\n\`\`\``;
+  }
+  const visible = lines.slice(0, CODEBLOCK_MAX_LINES).join("\n");
+  const remaining = lines.length - CODEBLOCK_MAX_LINES;
+  return `\`\`\`\n${visible}\n\`\`\`\n... +${remaining} lines`;
+}
+
 function buildPermissionCard(
   requestId: string,
   toolName: string,
@@ -325,7 +342,7 @@ function buildPermissionCard(
     elements: [
       {
         tag: "markdown",
-        content: `**Tool:** \`${toolName}\`\n\`\`\`\n${prettyInput}\n\`\`\``,
+        content: `**Tool:** \`${toolName}\`\n${formatCodeBlock(prettyInput)}`,
       },
       { tag: "hr" },
       {
@@ -601,6 +618,19 @@ const cardHandler = new lark.CardActionHandler(
 
         // Return updated card wrapped in callback response format.
         // Feishu requires: { card: { type: "raw", data: { ...cardJson } } }
+        // Retain command content so user can review historical operations.
+        let contentMd: string;
+        if (details) {
+          let prettyInput: string;
+          try {
+            prettyInput = JSON.stringify(JSON.parse(details.input_preview), null, 2);
+          } catch {
+            prettyInput = details.input_preview;
+          }
+          contentMd = `**Tool:** \`${details.tool_name}\`\n${formatCodeBlock(prettyInput)}`;
+        } else {
+          contentMd = `**Request ID:** \`${requestId}\``;
+        }
         return {
           toast: { type: behavior === "allow" ? "success" : "warning", content: label },
           card: {
@@ -617,9 +647,7 @@ const cardHandler = new lark.CardActionHandler(
               elements: [
                 {
                   tag: "markdown",
-                  content: details
-                    ? `**Tool:** \`${details.tool_name}\`\n**Request ID:** \`${requestId}\``
-                    : `**Request ID:** \`${requestId}\``,
+                  content: contentMd,
                 },
               ],
             },
