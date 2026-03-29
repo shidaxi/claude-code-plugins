@@ -12,6 +12,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 import * as lark from "@larksuiteoapi/node-sdk";
 import {
   appendFileSync,
@@ -123,6 +124,16 @@ const pendingReactions = new Map<
 
 const REACTION_EMOJI = process.env.FEISHU_REACTION_EMOJI ?? "Get";
 
+// Permission-relay: 5 lowercase letters a-z minus 'l' (avoids l/1/I confusion).
+// Case-insensitive for phone autocorrect. Matches "y xxxxx" / "yes xxxxx" / "n xxxxx" / "no xxxxx".
+const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i;
+
+// Stores full permission details keyed by request_id for "See more" expansion.
+const pendingPermissions = new Map<
+  string,
+  { readonly tool_name: string; readonly description: string; readonly input_preview: string }
+>();
+
 // Helper to send a text message to a Feishu chat.
 async function sendText(chatId: string, text: string): Promise<void> {
   await client.im.message.create({
@@ -168,6 +179,10 @@ const mcp = new Server(
     capabilities: {
       experimental: {
         "claude/channel": {},
+        // Permission-relay opt-in: allows Claude Code to forward tool approval
+        // prompts to Feishu so users can approve/deny remotely via card buttons.
+        // Safe because gate (shouldDeliver/allowFrom) already drops non-allowlisted senders.
+        "claude/channel/permission": {},
       },
       tools: {},
     },
@@ -232,8 +247,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       },
       data: {
         receive_id: receiveId,
-        msg_type: "text",
-        content: JSON.stringify({ text }),
+        msg_type: "interactive",
+        content: JSON.stringify({
+          config: { wide_screen_mode: true },
+          elements: [{ tag: "markdown", content: text }],
+        }),
       },
     });
 
@@ -267,6 +285,119 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       content: [{ type: "text", text: `reply failed: ${msg}` }],
       isError: true,
     };
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Permission relay: receive permission_request from Claude Code, send
+// interactive card with Allow/Deny buttons to all allowlisted users.
+// ---------------------------------------------------------------------------
+
+const PermissionRequestSchema = z.object({
+  method: z.literal("notifications/claude/channel/permission_request"),
+  params: z.object({
+    request_id: z.string(),
+    tool_name: z.string(),
+    description: z.string(),
+    input_preview: z.string(),
+  }),
+});
+
+function buildPermissionCard(
+  requestId: string,
+  toolName: string,
+  description: string,
+  inputPreview: string,
+): Record<string, unknown> {
+  let prettyInput: string;
+  try {
+    prettyInput = JSON.stringify(JSON.parse(inputPreview), null, 2);
+  } catch {
+    prettyInput = inputPreview;
+  }
+
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: "plain_text", content: `🔐 ${description}` },
+      template: "orange",
+    },
+    elements: [
+      {
+        tag: "markdown",
+        content: `**Tool:** \`${toolName}\`\n\`\`\`\n${prettyInput}\n\`\`\``,
+      },
+      { tag: "hr" },
+      {
+        tag: "action",
+        actions: [
+          {
+            tag: "button",
+            text: { tag: "plain_text", content: "✅ Allow" },
+            type: "primary",
+            value: { action: "allow", request_id: requestId },
+          },
+          {
+            tag: "button",
+            text: { tag: "plain_text", content: "❌ Deny" },
+            type: "danger",
+            value: { action: "deny", request_id: requestId },
+          },
+        ],
+      },
+      {
+        tag: "note",
+        elements: [
+          {
+            tag: "plain_text",
+            content: `y ${requestId} / n ${requestId}`,
+          },
+        ],
+      },
+    ],
+  };
+}
+
+mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
+  const { request_id, tool_name, description, input_preview } = params;
+  pendingPermissions.set(request_id, { tool_name, description, input_preview });
+  debugLog(`permission_request received: id=${request_id} tool=${tool_name}`);
+
+  const cardJson = buildPermissionCard(request_id, tool_name, description, input_preview);
+  const cardContent = JSON.stringify(cardJson);
+  const lastChatId = readLastChatId();
+
+  // Send to last known chat if available; otherwise DM each allowlisted user.
+  // Avoid sending both to prevent duplicate cards for users in the group chat.
+  if (lastChatId) {
+    client.im.v1.message
+      .create({
+        params: { receive_id_type: "chat_id" },
+        data: {
+          receive_id: lastChatId,
+          msg_type: "interactive",
+          content: cardContent,
+        },
+      })
+      .catch((err) => {
+        fileLog(`permission card send failed (chat): ${String(err)}`);
+      });
+  } else {
+    // No active chat — DM each allowlisted user as fallback.
+    for (const openId of access.allowFrom) {
+      client.im.v1.message
+        .create({
+          params: { receive_id_type: "open_id" },
+          data: {
+            receive_id: openId,
+            msg_type: "interactive",
+            content: cardContent,
+          },
+        })
+        .catch((err) => {
+          debugLog(`permission card DM to ${openId} failed: ${String(err)}`);
+        });
+    }
   }
 });
 
@@ -315,11 +446,62 @@ const dispatcher = new lark.EventDispatcher({
         return;
       }
 
+      // Permission-reply intercept: if this looks like "y xxxxx" / "n xxxxx"
+      // for a pending permission request, emit the verdict instead of relaying
+      // as chat. The sender already passed the allowFrom gate.
+      const permMatch = PERMISSION_REPLY_RE.exec(textContent);
+      if (permMatch) {
+        const requestId = permMatch[2]!.toLowerCase();
+        const behavior = permMatch[1]!.toLowerCase().startsWith("y") ? "allow" : "deny";
+        debugLog(`permission verdict via text: id=${requestId} behavior=${behavior}`);
+        void mcp
+          .notification({
+            method: "notifications/claude/channel/permission",
+            params: { request_id: requestId, behavior },
+          })
+          .catch((err) => {
+            fileLog(`permission verdict notification failed: ${String(err)}`);
+          });
+        pendingPermissions.delete(requestId);
+        // Acknowledge with emoji reaction.
+        const messageId = String(message.message_id ?? "");
+        if (messageId) {
+          const emoji = behavior === "allow" ? "OK" : "CrossMark";
+          client.im.messageReaction
+            .create({
+              path: { message_id: messageId },
+              data: { reaction_type: { emoji_type: emoji } },
+            })
+            .catch(() => {});
+        }
+        return;
+      }
+
       // Persist last active chat for startup notification on next restart.
       saveLastChatId(chatId);
 
-      const content = formatMessageContent(message.message_type, message.content);
       const messageId = String(message.message_id ?? "");
+
+      // Try event payload content first; if empty for non-text types, fetch via API.
+      let rawContent = message.content;
+      debugLog(`event content type=${typeof rawContent} value=${JSON.stringify(rawContent)?.slice(0, 300)}`);
+      if (!rawContent && messageId) {
+        debugLog(`content empty for message_type=${message.message_type}, fetching via API`);
+        try {
+          const fetched: any = await client.im.message.get({
+            path: { message_id: messageId },
+          });
+          const body = fetched?.data?.items?.[0]?.body?.content ?? fetched?.data?.body?.content;
+          if (body) {
+            rawContent = body;
+            debugLog(`API fetch content: ${String(rawContent).slice(0, 300)}`);
+          }
+        } catch (fetchErr) {
+          debugLog(`API fetch failed: ${String(fetchErr)}`);
+        }
+      }
+
+      const content = formatMessageContent(message.message_type, rawContent);
       const userName =
         event?.sender?.sender_id?.open_id ??
         event?.sender?.sender_id?.user_id ??
@@ -374,7 +556,92 @@ const dispatcher = new lark.EventDispatcher({
   },
 });
 
-wsClient.start({ eventDispatcher: dispatcher });
+// Card action handler for permission relay button clicks.
+// Receives card.action.trigger events via WSClient when a user clicks
+// Allow/Deny/See More on a permission card.
+const cardHandler = new lark.CardActionHandler(
+  {},
+  async (data: any) => {
+    try {
+      const actionValue = data?.action?.value ?? {};
+      const action = String(actionValue.action ?? "");
+      const requestId = String(actionValue.request_id ?? "");
+      const operatorOpenId = String(data?.operator?.open_id ?? "");
+
+      debugLog(
+        `card.action.trigger: action=${action} request_id=${requestId} operator=${operatorOpenId}`
+      );
+
+      if (!requestId || !action) {
+        return { toast: { type: "info", content: "Unknown action" } };
+      }
+
+      // Verify the operator is in the allowlist.
+      if (
+        access.allowFrom.length > 0 &&
+        !access.allowFrom.includes(operatorOpenId)
+      ) {
+        return { toast: { type: "error", content: "Not authorized" } };
+      }
+
+      if (action === "allow" || action === "deny") {
+        const behavior = action;
+        void mcp
+          .notification({
+            method: "notifications/claude/channel/permission",
+            params: { request_id: requestId, behavior },
+          })
+          .catch((err) => {
+            fileLog(`permission verdict notification failed: ${String(err)}`);
+          });
+        const details = pendingPermissions.get(requestId);
+        pendingPermissions.delete(requestId);
+        const label = behavior === "allow" ? "✅ Allowed" : "❌ Denied";
+        debugLog(`permission verdict via card: id=${requestId} behavior=${behavior}`);
+
+        // Return updated card wrapped in callback response format.
+        // Feishu requires: { card: { type: "raw", data: { ...cardJson } } }
+        return {
+          toast: { type: behavior === "allow" ? "success" : "warning", content: label },
+          card: {
+            type: "raw",
+            data: {
+              config: { wide_screen_mode: true },
+              header: {
+                title: {
+                  tag: "plain_text",
+                  content: `🔐 ${label}${details ? ` — ${details.tool_name}` : ""}`,
+                },
+                template: behavior === "allow" ? "green" : "red",
+              },
+              elements: [
+                {
+                  tag: "markdown",
+                  content: details
+                    ? `**Tool:** \`${details.tool_name}\`\n**Request ID:** \`${requestId}\``
+                    : `**Request ID:** \`${requestId}\``,
+                },
+              ],
+            },
+          },
+        };
+      }
+
+      return { toast: { type: "info", content: "Unknown action" } };
+    } catch (err) {
+      fileLog(`card action handler error: ${String(err)}`);
+      return { toast: { type: "error", content: "Internal error" } };
+    }
+  }
+);
+
+// In WS mode, callbacks must be handled by eventDispatcher.
+// Reuse the existing cardHandler callback implementation to build response payload.
+dispatcher.register({
+  "card.action.trigger": async (data: any) => cardHandler.cardHandler(data),
+});
+
+wsClient.start({ eventDispatcher: dispatcher, cardHandler });
 fileLog("websocket client started");
 process.stderr.write("feishu channel: websocket started\n");
 
@@ -456,7 +723,12 @@ function shouldDeliver(senderId: string, allowFrom: string[], strict: boolean): 
 
 function formatMessageContent(messageTypeRaw: unknown, contentRaw: unknown): string {
   const messageType = String(messageTypeRaw ?? "");
-  const content = String(contentRaw ?? "");
+  // Preserve object content for post parsing; stringify only for text types
+  const content =
+    typeof contentRaw === "object" && contentRaw !== null
+      ? JSON.stringify(contentRaw)
+      : String(contentRaw ?? "");
+  debugLog(`formatMessageContent: type=${messageType} content_type=${typeof contentRaw} content_len=${content.length} content_preview=${content.slice(0, 200)}`);
 
   if (messageType === "text") {
     try {
@@ -471,7 +743,7 @@ function formatMessageContent(messageTypeRaw: unknown, contentRaw: unknown): str
   if (messageType === "audio") return "(audio message)";
   if (messageType === "media") return "(media message)";
   if (messageType === "sticker") return "(sticker message)";
-  if (messageType === "post") return "(rich text message)";
+  if (messageType === "post") return parsePostContent(content);
   if (messageType === "interactive") return "(interactive card message)";
   if (messageType === "share_chat") return "(share chat message)";
   if (messageType === "share_user") return "(share user message)";
@@ -517,6 +789,70 @@ function extractTextContent(messageTypeRaw: unknown, contentRaw: unknown): strin
     return parsed.text ?? "";
   } catch {
     return "";
+  }
+}
+
+/**
+ * Parse Feishu "post" (rich text) message content into readable plain text.
+ *
+ * Post content structure:
+ *   { "<locale>": { "title": "...", "content": [[inline_elements...], ...] } }
+ *
+ * Inline element tags: text, a (link), at (mention), img, media, emotion, etc.
+ */
+function parsePostContent(raw: string): string {
+  debugLog(`parsePostContent raw (${raw.length} chars): ${raw.slice(0, 500)}`);
+  try {
+    // Handle case where raw might already be an object (stringified via String())
+    const parsed: Record<string, unknown> =
+      typeof raw === "object" && raw !== null
+        ? (raw as unknown as Record<string, unknown>)
+        : JSON.parse(raw);
+    debugLog(`parsePostContent parsed keys: ${Object.keys(parsed).join(", ")}`);
+    // Pick the first available locale (zh_cn, en_us, ja_jp, etc.)
+    const localeData = Object.values(parsed).find(
+      (v): v is { title?: string; content?: unknown[][] } =>
+        typeof v === "object" && v !== null && "content" in v
+    );
+    if (!localeData?.content) return raw || "(empty rich text)";
+
+    const paragraphs: string[] = [];
+
+    if (localeData.title) {
+      paragraphs.push(localeData.title);
+    }
+
+    for (const paragraph of localeData.content) {
+      if (!Array.isArray(paragraph)) continue;
+      const parts: string[] = [];
+      for (const el of paragraph) {
+        if (typeof el !== "object" || el === null) continue;
+        const node = el as Record<string, unknown>;
+        const tag = String(node.tag ?? "");
+        if (tag === "text") {
+          parts.push(String(node.text ?? ""));
+        } else if (tag === "a") {
+          const text = String(node.text ?? "");
+          const href = String(node.href ?? "");
+          parts.push(text && href ? `[${text}](${href})` : text || href);
+        } else if (tag === "at") {
+          parts.push(`@${String(node.user_name ?? node.user_id ?? "user")}`);
+        } else if (tag === "emotion") {
+          parts.push(`[${String(node.emoji_type ?? "emoji")}]`);
+        } else if (tag === "img") {
+          parts.push("(image)");
+        } else if (tag === "media") {
+          parts.push("(media)");
+        }
+      }
+      paragraphs.push(parts.join(""));
+    }
+
+    const result = paragraphs.join("\n").trim();
+    return result || "(empty rich text)";
+  } catch (err) {
+    debugLog(`parsePostContent error: ${String(err)}`);
+    return raw || "(rich text message)";
   }
 }
 
