@@ -55,13 +55,13 @@ FEISHU_PROFILE=bot-a claude --channels plugin:feishu@shidaxi
 
 ```bash
 # 终端 1
-claude --channels plugin:feishu@shidaxi
+claude --dangerously-load-development-channels plugin:feishu@shidaxi
 
 # 终端 2
-FEISHU_PROFILE=bot-a claude --channels plugin:feishu@shidaxi
+FEISHU_PROFILE=bot-a claude --dangerously-load-development-channels plugin:feishu@shidaxi
 
 # 终端 3
-FEISHU_PROFILE=bot-b claude --channels plugin:feishu@shidaxi
+FEISHU_PROFILE=bot-b claude --dangerously-load-development-channels plugin:feishu@shidaxi
 ```
 
 每个实例连接各自的飞书应用，互不干扰。详细配置见 [feishu 插件文档](./plugins/feishu/README.md#5-多-profile-支持)。
