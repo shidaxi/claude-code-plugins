@@ -8,6 +8,13 @@
 - 权限中继（Permission Relay）— 在飞书中审批 Claude 的工具调用请求
 - 多 Profile 支持 — 同时运行多个飞书机器人
 
+## 前置依赖
+
+- [Bun](https://bun.sh/) — 插件运行时，用于安装依赖和执行 TypeScript
+  ```bash
+  curl -fsSL https://bun.sh/install | bash
+  ```
+
 ## 1) 安装插件
 
 在 Claude Code 会话里执行：
@@ -61,7 +68,7 @@ FEISHU_DEBUG=true
 
 ## 3) 配置飞书应用
 
-在飞书开放平台应用后台：
+在 [飞书开放平台](https://open.feishu.cn/app) 应用后台：
 
 1. 创建企业自建应用
 2. 启用机器人能力
@@ -77,10 +84,12 @@ FEISHU_DEBUG=true
    - `im:resource`
    - `cardkit:card:write`
    - `cardkit:card:read`
-4. 订阅事件 `im.message.receive_v1`
+4. 配置事件订阅 — 在「事件与回调」页面：
+   - **回调配置**：选择 **使用长连接接收事件**（插件使用 SDK 的 `WSClient` 长连接模式，不需要公网 IP 或 Webhook）
+   - **添加事件**：
+     - `im.message.receive_v1` — 接收消息
+     - `card.action.trigger` — 卡片交互回调（权限中继审批按钮需要）
 5. 发布版本并完成管理员审批
-
-插件使用 SDK 的 `WSClient` 长连接模式，不需要公网 webhook。
 
 ## 4) 启动 Channel
 
