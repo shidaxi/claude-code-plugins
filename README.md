@@ -41,12 +41,14 @@ claude --channels plugin:feishu@shidaxi
 
 ### 启动单个 Profile
 
+⚠️ 非official marketplace 的 channel plugin，需要使用 `--dangerously-load-development-channels` 而不是 `--channels` 
+
 ```bash
 # 启动默认 profile
-claude --channels plugin:feishu@shidaxi
+claude --dangerously-load-development-channels plugin:feishu@shidaxi
 
 # 启动指定 profile
-FEISHU_PROFILE=bot-a claude --channels plugin:feishu@shidaxi
+FEISHU_PROFILE=bot-a claude --dangerously-load-development-channels plugin:feishu@shidaxi
 ```
 
 ### 同时启动多个 Profile
