@@ -24,48 +24,29 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+// ---------------------------------------------------------------------------
+// Profile-gated startup: FEISHU_PROFILE must be set to activate the channel.
+// Without it the MCP server runs idle — no Feishu connection, no resources.
+// This prevents every Claude Code instance from spawning a WS connection.
+// ---------------------------------------------------------------------------
 const FEISHU_PROFILE = process.env.FEISHU_PROFILE ?? "";
+const CHANNEL_ACTIVE = FEISHU_PROFILE !== "";
+
 const STATE_DIR =
   process.env.FEISHU_STATE_DIR ??
-  (FEISHU_PROFILE
-    ? join(homedir(), ".claude", "channels", "feishu", "profiles", FEISHU_PROFILE)
-    : join(homedir(), ".claude", "channels", "feishu"));
-const ENV_FILE = join(STATE_DIR, ".env");
-const ACCESS_FILE = join(STATE_DIR, "access.json");
+  join(homedir(), ".claude", "channels", "feishu", "profiles", FEISHU_PROFILE || "_idle");
 const LOG_FILE = join(STATE_DIR, "feishu.log");
-const LAST_CHAT_ID_FILE = join(STATE_DIR, "last_chat_id");
 
 function fileLog(message: string): void {
-  const ts = new Date().toISOString();
-  appendFileSync(LOG_FILE, `[${ts}] ${message}\n`);
+  if (!CHANNEL_ACTIVE) return;
+  try {
+    const ts = new Date().toISOString();
+    appendFileSync(LOG_FILE, `[${ts}] ${message}\n`);
+  } catch {}
 }
 
-loadDotEnv(ENV_FILE);
-
-const APP_ID = process.env.FEISHU_APP_ID;
-const APP_SECRET = process.env.FEISHU_APP_SECRET;
-const DOMAIN = process.env.FEISHU_DOMAIN;
-const DEBUG = process.env.FEISHU_DEBUG === "true";
-
-if (!APP_ID || !APP_SECRET) {
-  process.stderr.write(
-    "feishu channel: FEISHU_APP_ID and FEISHU_APP_SECRET are required\n" +
-      ` set in ${ENV_FILE}\n` +
-      " format:\n" +
-      " FEISHU_APP_ID=cli_xxx\n" +
-      " FEISHU_APP_SECRET=xxx\n"
-  );
-  process.exit(1);
-}
-
-const requireAllowlist = process.env.FEISHU_REQUIRE_ALLOWLIST === "true";
-const access = loadAccess();
-if (requireAllowlist && access.allowFrom.length === 0) {
-  process.stderr.write(
-    "feishu channel: FEISHU_REQUIRE_ALLOWLIST=true but allowFrom is empty; all inbound messages will be dropped\n"
-  );
-}
-
+// Global error handlers — keep the process alive so Claude Code doesn't
+// report an MCP server crash.
 process.on("unhandledRejection", (err) => {
   process.stderr.write(`feishu channel: unhandled rejection: ${String(err)}\n`);
 });
@@ -73,23 +54,37 @@ process.on("uncaughtException", (err) => {
   process.stderr.write(`feishu channel: uncaught exception: ${String(err)}\n`);
 });
 
-debugLog(
-  `boot config: profile=${FEISHU_PROFILE || "(default)"} app_id=${mask(APP_ID)} domain=${DOMAIN || "default"} allowlist_size=${
-    access.allowFrom.length
-  } require_allowlist=${String(requireAllowlist)}`
-);
-
-const baseConfig: {
-  appId: string;
-  appSecret: string;
-  domain?: string;
-} = {
-  appId: APP_ID,
-  appSecret: APP_SECRET,
-};
-if (DOMAIN) {
-  baseConfig.domain = DOMAIN;
+// Reliable parent-exit detection: if the parent process (Claude Code) dies,
+// our stdin closes. We also poll to catch reparenting to init (ppid 1).
+// This prevents zombie bun processes lingering after Claude Code exits.
+let shuttingDown = false;
+function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  process.stderr.write("feishu channel: shutting down\n");
+  try {
+    if (wsClient && typeof wsClient.stop === "function") wsClient.stop();
+  } catch {}
+  // Force exit after a short grace period — don't let dangling connections
+  // keep the process alive.
+  setTimeout(() => process.exit(0), 500);
 }
+process.stdin.on("end", shutdown);
+process.stdin.on("close", shutdown);
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+process.on("SIGHUP", shutdown);
+
+// Poll for parent death: when Claude Code exits, our ppid becomes 1 (init).
+const parentPid = process.ppid;
+const ppidTimer = setInterval(() => {
+  if (process.ppid !== parentPid) {
+    process.stderr.write("feishu channel: parent process gone, exiting\n");
+    clearInterval(ppidTimer);
+    shutdown();
+  }
+}, 2000);
+ppidTimer.unref();
 
 // The Lark SDK's default logger uses console.log/console.info which write to
 // stdout. Since MCP uses stdio (JSON-RPC over stdout/stdin), any non-JSON-RPC
@@ -112,12 +107,65 @@ const stderrLogger = {
   },
 };
 
-const client = new lark.Client({ ...baseConfig, logger: stderrLogger });
-const wsClient: any = new lark.WSClient({
-  ...baseConfig,
-  loggerLevel: lark.LoggerLevel.info,
-  logger: stderrLogger,
-});
+// --- Lark SDK clients (only created when CHANNEL_ACTIVE) -------------------
+let client: lark.Client | null = null;
+let wsClient: any = null;
+let access: { allowFrom: string[] } = { allowFrom: [] };
+let requireAllowlist = false;
+const DEBUG = process.env.FEISHU_DEBUG === "true";
+
+if (CHANNEL_ACTIVE) {
+  const ENV_FILE = join(STATE_DIR, ".env");
+  const ACCESS_FILE = join(STATE_DIR, "access.json");
+  loadDotEnv(ENV_FILE);
+
+  const APP_ID = process.env.FEISHU_APP_ID;
+  const APP_SECRET = process.env.FEISHU_APP_SECRET;
+  const DOMAIN = process.env.FEISHU_DOMAIN;
+
+  if (!APP_ID || !APP_SECRET) {
+    process.stderr.write(
+      `feishu channel [${FEISHU_PROFILE}]: FEISHU_APP_ID and FEISHU_APP_SECRET are required\n` +
+        ` set in ${ENV_FILE}\n` +
+        " format:\n" +
+        " FEISHU_APP_ID=cli_xxx\n" +
+        " FEISHU_APP_SECRET=xxx\n"
+    );
+    process.exit(1);
+  }
+
+  requireAllowlist = process.env.FEISHU_REQUIRE_ALLOWLIST === "true";
+  access = loadAccess(ACCESS_FILE, STATE_DIR);
+  if (requireAllowlist && access.allowFrom.length === 0) {
+    process.stderr.write(
+      `feishu channel [${FEISHU_PROFILE}]: FEISHU_REQUIRE_ALLOWLIST=true but allowFrom is empty; all inbound messages will be dropped\n`
+    );
+  }
+
+  const baseConfig: { appId: string; appSecret: string; domain?: string } = {
+    appId: APP_ID,
+    appSecret: APP_SECRET,
+  };
+  if (DOMAIN) baseConfig.domain = DOMAIN;
+
+  client = new lark.Client({ ...baseConfig, logger: stderrLogger });
+  wsClient = new lark.WSClient({
+    ...baseConfig,
+    loggerLevel: lark.LoggerLevel.info,
+    logger: stderrLogger,
+  });
+
+  debugLog(
+    `boot config: profile=${FEISHU_PROFILE} app_id=${mask(APP_ID)} domain=${DOMAIN || "default"} allowlist_size=${
+      access.allowFrom.length
+    } require_allowlist=${String(requireAllowlist)}`
+  );
+} else {
+  process.stderr.write(
+    "feishu channel: FEISHU_PROFILE not set — running idle (no Feishu connection)\n" +
+      " set FEISHU_PROFILE=<name> to activate a profile\n"
+  );
+}
 
 // Track pending "GET" reactions so we can remove them when Claude replies.
 // Key: chat_id, Value: array of {messageId, reactionId} awaiting reply.
@@ -126,6 +174,7 @@ const pendingReactions = new Map<
   ReadonlyArray<{ readonly messageId: string; readonly reactionId: string }>
 >();
 
+const LAST_CHAT_ID_FILE = join(STATE_DIR, "last_chat_id");
 const REACTION_EMOJI = process.env.FEISHU_REACTION_EMOJI ?? "Get";
 
 // Permission-relay: 5 lowercase letters a-z minus 'l' (avoids l/1/I confusion).
@@ -140,6 +189,7 @@ const pendingPermissions = new Map<
 
 // Helper to send a text message to a Feishu chat.
 async function sendText(chatId: string, text: string): Promise<void> {
+  if (!client) return;
   await client.im.message.create({
     params: { receive_id_type: "chat_id" },
     data: {
@@ -251,6 +301,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
     if (!receiveId) throw new Error("chat_id is required");
     if (!text) throw new Error("text is required");
+    if (!client) throw new Error("channel not active — set FEISHU_PROFILE to enable");
 
     const res: any = await client.im.v1.message.create({
       params: {
@@ -270,11 +321,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
     // Remove pending "GET" reactions for this chat (best-effort, non-blocking).
     const reactions = pendingReactions.get(receiveId);
-    if (reactions && reactions.length > 0) {
+    if (client && reactions && reactions.length > 0) {
       pendingReactions.delete(receiveId);
+      const c = client;
       Promise.allSettled(
         reactions.map((r) =>
-          client.im.messageReaction.delete({
+          c.im.messageReaction.delete({
             path: { message_id: r.messageId, reaction_id: r.reactionId },
           })
         )
@@ -392,6 +444,7 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
 
   // Send to last known chat if available; otherwise DM each allowlisted user.
   // Avoid sending both to prevent duplicate cards for users in the group chat.
+  if (!client) return;
   if (lastChatId) {
     client.im.v1.message
       .create({
@@ -427,10 +480,14 @@ mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
 await mcp.connect(new StdioServerTransport());
 fileLog("mcp transport connected");
 
+if (CHANNEL_ACTIVE && client && wsClient) {
 // Wait for Claude Code to finish MCP initialization (listTools, etc.)
 // before connecting to Feishu, so the first inbound message isn't lost.
 await new Promise((r) => setTimeout(r, 2000));
 fileLog("post-connect delay done, starting WS client");
+
+const larkClient = client!;
+const larkWsClient = wsClient!;
 
 const dispatcher = new lark.EventDispatcher({
   logger: stderrLogger,
@@ -490,7 +547,7 @@ const dispatcher = new lark.EventDispatcher({
         const messageId = String(message.message_id ?? "");
         if (messageId) {
           const emoji = behavior === "allow" ? "OK" : "CrossMark";
-          client.im.messageReaction
+          larkClient.im.messageReaction
             .create({
               path: { message_id: messageId },
               data: { reaction_type: { emoji_type: emoji } },
@@ -511,7 +568,7 @@ const dispatcher = new lark.EventDispatcher({
       if (!rawContent && messageId) {
         debugLog(`content empty for message_type=${message.message_type}, fetching via API`);
         try {
-          const fetched: any = await client.im.message.get({
+          const fetched: any = await larkClient.im.message.get({
             path: { message_id: messageId },
           });
           const body = fetched?.data?.items?.[0]?.body?.content ?? fetched?.data?.body?.content;
@@ -559,7 +616,7 @@ const dispatcher = new lark.EventDispatcher({
       // Add "GET" reaction as a read receipt; store reaction_id for removal on reply.
       if (messageId) {
         try {
-          const reactionRes: any = await client.im.messageReaction.create({
+          const reactionRes: any = await larkClient.im.messageReaction.create({
             path: { message_id: messageId },
             data: { reaction_type: { emoji_type: REACTION_EMOJI } },
           });
@@ -675,28 +732,13 @@ dispatcher.register({
   "card.action.trigger": async (data: any) => cardHandler.cardHandler(data),
 });
 
-wsClient.start({ eventDispatcher: dispatcher, cardHandler });
+larkWsClient.start({ eventDispatcher: dispatcher, cardHandler });
 fileLog("websocket client started");
-process.stderr.write("feishu channel: websocket started\n");
+process.stderr.write(`feishu channel [${FEISHU_PROFILE}]: websocket started\n`);
 
 // Send startup notification after WS client has connected (3s delay).
 setTimeout(notifyStartup, 3000);
-
-let shuttingDown = false;
-function shutdown() {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  process.stderr.write("feishu channel: shutting down\n");
-  try {
-    if (typeof wsClient.stop === "function") wsClient.stop();
-  } catch {}
-  setTimeout(() => process.exit(0), 1200);
-}
-
-process.stdin.on("end", shutdown);
-process.stdin.on("close", shutdown);
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+} // end if (CHANNEL_ACTIVE)
 
 function loadDotEnv(filePath: string) {
   try {
@@ -719,14 +761,14 @@ function loadDotEnv(filePath: string) {
 
 type Access = { allowFrom: string[] };
 
-function loadAccess(): Access {
+function loadAccess(accessFile: string, stateDir: string): Access {
   const fromEnv = (process.env.FEISHU_ALLOWED_USER_IDS ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
 
   try {
-    const raw = readFileSync(ACCESS_FILE, "utf8");
+    const raw = readFileSync(accessFile, "utf8");
     const parsed = JSON.parse(raw) as Partial<Access>;
     const fileList = Array.isArray(parsed.allowFrom) ? parsed.allowFrom : [];
     return {
@@ -735,8 +777,8 @@ function loadAccess(): Access {
   } catch {
     const data = { allowFrom: uniqueStrings(fromEnv) };
     try {
-      mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-      writeFileSync(ACCESS_FILE, JSON.stringify(data, null, 2) + "\n", {
+      mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+      writeFileSync(accessFile, JSON.stringify(data, null, 2) + "\n", {
         mode: 0o600,
       });
     } catch {}

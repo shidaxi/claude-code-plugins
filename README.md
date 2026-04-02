@@ -30,8 +30,8 @@ Claude Code 插件市场 by shidaxi.
 # 4. 配置飞书凭据（交互式向导）
 /feishu:configure
 
-# 5. 启动 channel
-claude --channels plugin:feishu@shidaxi
+# 5. 启动 channel（FEISHU_PROFILE 必填）
+FEISHU_PROFILE=my-bot claude --dangerously-load-development-channels plugin:feishu@shidaxi
 ```
 
 ## 飞书应用配置
@@ -59,49 +59,39 @@ claude --channels plugin:feishu@shidaxi
      - `card.action.trigger` — 卡片交互回调（用户点击权限审批卡片的 Allow/Deny 按钮时触发）
 5. **发布版本** — 创建版本并提交管理员审批
 
-## 多 Profile 启动
+## 多 Profile 支持
 
-飞书插件支持同时运行多个机器人实例，每个 profile 拥有独立的凭据和配置。
+飞书插件通过 `FEISHU_PROFILE` 环境变量控制激活。**不设置 `FEISHU_PROFILE` 时，插件不会连接飞书**，MCP server 处于空跑状态，不消耗任何资源。
 
-### 配置多个 Profile
+### 配置 Profile
 
 ```bash
-# 配置默认 profile
-/feishu:configure
+# 配置名为 my-bot 的 profile
+/feishu:configure my-bot
 
-# 配置命名 profile（如 bot-a、bot-b）
-/feishu:configure bot-a
+# 配置另一个 profile
 /feishu:configure bot-b
 ```
 
-### 启动单个 Profile
-
-⚠️ 非official marketplace 的 channel plugin，需要使用 `--dangerously-load-development-channels` 而不是 `--channels`
+### 启动
 
 ```bash
-# 启动默认 profile
-claude --dangerously-load-development-channels plugin:feishu@shidaxi
-
-# 启动指定 profile
-FEISHU_PROFILE=bot-a claude --dangerously-load-development-channels plugin:feishu@shidaxi
+FEISHU_PROFILE=my-bot claude --dangerously-load-development-channels plugin:feishu@shidaxi
 ```
 
 ### 同时启动多个 Profile
 
-在不同终端窗口中分别启动即可：
+在不同终端窗口中分别启动：
 
 ```bash
 # 终端 1
-claude --dangerously-load-development-channels plugin:feishu@shidaxi
+FEISHU_PROFILE=my-bot claude --dangerously-load-development-channels plugin:feishu@shidaxi
 
 # 终端 2
-FEISHU_PROFILE=bot-a claude --dangerously-load-development-channels plugin:feishu@shidaxi
-
-# 终端 3
 FEISHU_PROFILE=bot-b claude --dangerously-load-development-channels plugin:feishu@shidaxi
 ```
 
-每个实例连接各自的飞书应用，互不干扰。详细配置见 [feishu 插件文档](./plugins/feishu/README.md#5-多-profile-支持)。
+每个实例连接各自的飞书应用，互不干扰。详细配置见 [feishu 插件文档](./plugins/feishu/README.md)。
 
 ## 手动注册市场
 

@@ -3,8 +3,13 @@
   "description": "Feishu/Lark channel for Claude Code — messaging bridge via WebSocket long-connection with access control.",
   "version": "0.1.0",
   "keywords": ["feishu", "lark", "channel", "mcp"],
-  "skills": [
-    "./commands/access",
-    "./commands/configure"
+  "commands": [
+    "./commands/access.md",
+    "./commands/configure.md"
+  ],
+  "channels": [
+    {
+      "server": "feishu"
+    }
   ]
 }

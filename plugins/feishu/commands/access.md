@@ -7,11 +7,10 @@ allowed-tools: Read, Write
 
 1. **命令参数**：如 `/feishu:access list bot1` → 使用 `bot1` profile
 2. **环境变量**：`$FEISHU_PROFILE`（通过 `echo $FEISHU_PROFILE` 检查）
-3. **默认**：以上都没有时使用默认 profile
+3. **无 profile**：以上都没有时，列出 `~/.claude/channels/feishu/profiles/` 下所有已有 profile 供用户选择
 
 路径映射：
-- 默认 profile：`~/.claude/channels/feishu/access.json`
-- 命名 profile（如 `bot2`）：`~/.claude/channels/feishu/profiles/bot2/access.json`
+- `~/.claude/channels/feishu/profiles/<name>/access.json`
 
 目标结构：
 

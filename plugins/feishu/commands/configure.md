@@ -7,8 +7,8 @@ allowed-tools: Read, Write, Bash(mkdir *), Bash(chmod *), Bash(ls *), Bash(cat *
 
 状态目录结构：
 
-- 默认 profile：`~/.claude/channels/feishu`
-- 命名 profile（如 `bot1`）：`~/.claude/channels/feishu/profiles/bot1`
+- 所有 profile 均为命名 profile：`~/.claude/channels/feishu/profiles/<name>`
+- 不存在 default profile，必须指定名称
 
 ---
 
@@ -25,22 +25,19 @@ allowed-tools: Read, Write, Bash(mkdir *), Bash(chmod *), Bash(ls *), Bash(cat *
 3. **交互选择**：以上都没有时，列出已有 profile 供用户选择
 
 列出已有 profile（仅在交互选择时需要）：
-- `ls ~/.claude/channels/feishu/profiles/ 2>/dev/null` — 列出命名 profile
-- `cat ~/.claude/channels/feishu/.env 2>/dev/null | grep FEISHU_APP_ID` — 检查默认 profile
+- `ls ~/.claude/channels/feishu/profiles/ 2>/dev/null` — 列出所有 profile
 
 ```
 已有的 profile：
-  - (default)  App ID: cli_xxx  ← $FEISHU_PROFILE 未设置时使用
-  - bot1       App ID: (未配置)
-  - bot2       App ID: cli_yyy
+  - bot1       App ID: cli_xxx
+  - bot2       App ID: (未配置)
 
-你要配置哪个 profile？输入名称，或 "default" 配置默认 profile，或输入新名称创建新 profile。
+你要配置哪个 profile？输入名称选择已有 profile，或输入新名称创建新 profile。
 ```
 
 **1b) 计算状态目录：**
 
-- 用户选择 `default` 或空 → `~/.claude/channels/feishu`
-- 用户输入名称（如 `bot1`） → `~/.claude/channels/feishu/profiles/bot1`
+- `~/.claude/channels/feishu/profiles/<name>`
 
 **1c) 检查现有配置：**
 
@@ -102,7 +99,7 @@ allowed-tools: Read, Write, Bash(mkdir *), Bash(chmod *), Bash(ls *), Bash(cat *
   - `im.message.receive_v1` — 接收消息（机器人收到用户消息时触发）
   - `card.action.trigger` — 卡片交互回调（用户点击权限审批卡片的 Allow/Deny 按钮时触发）
 
-> ⚠️ 必须选择「长连接」模式，不要使用 Webhook 模式。如果未添加 `card.action.trigger`，权限中继的审批按钮将无法工作。
+> 必须选择「长连接」模式，不要使用 Webhook 模式。如果未添加 `card.action.trigger`，权限中继的审批按钮将无法工作。
 
 **5) 发布应用**
 
@@ -184,9 +181,7 @@ allowed-tools: Read, Write, Bash(mkdir *), Bash(chmod *), Bash(ls *), Bash(cat *
 
 配置完成后，输出摘要（仅显示 App ID，不显示 Secret，标注 profile 名），并提醒：
 
-- 启动方式（根据 profile 类型）：
-  - 默认 profile：`claude --channel feishu`
-  - 命名 profile：`FEISHU_PROFILE=<name> claude --channel feishu`
+- 启动方式：`FEISHU_PROFILE=<name> claude --channels plugin:feishu@shidaxi`
 - 在飞书中找到机器人发消息测试
 - 如需配置其他 profile，再次运行 `/feishu:configure`
 
