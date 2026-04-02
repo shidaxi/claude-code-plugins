@@ -353,7 +353,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 // ---------------------------------------------------------------------------
 // Permission relay: receive permission_request from Claude Code, send
-// interactive card with Allow/Deny buttons to all allowlisted users.
+// interactive card with Yes/No buttons to all allowlisted users.
 // ---------------------------------------------------------------------------
 
 const PermissionRequestSchema = z.object({
@@ -408,13 +408,13 @@ function buildPermissionCard(
         actions: [
           {
             tag: "button",
-            text: { tag: "plain_text", content: "✅ Allow" },
+            text: { tag: "plain_text", content: "✅ Yes" },
             type: "primary",
             value: { action: "allow", request_id: requestId },
           },
           {
             tag: "button",
-            text: { tag: "plain_text", content: "❌ Deny" },
+            text: { tag: "plain_text", content: "❌ No" },
             type: "danger",
             value: { action: "deny", request_id: requestId },
           },
@@ -676,7 +676,7 @@ const cardHandler = new lark.CardActionHandler(
           });
         const details = pendingPermissions.get(requestId);
         pendingPermissions.delete(requestId);
-        const label = behavior === "allow" ? "✅ Allowed" : "❌ Denied";
+        const label = behavior === "allow" ? "✅ Yes" : "❌ No";
         debugLog(`permission verdict via card: id=${requestId} behavior=${behavior}`);
 
         // Return updated card wrapped in callback response format.
